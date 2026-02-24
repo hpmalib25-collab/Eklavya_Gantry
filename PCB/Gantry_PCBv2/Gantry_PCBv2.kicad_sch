@@ -16820,7 +16820,7 @@
 		)
 		(uuid "13ed4a37-4666-4a66-9517-d93ecfd26a8d")
 	)
-	(label "SM4_A1"
+	(label "SM4_A2"
 		(at 246.888 270.256 0)
 		(effects
 			(font
@@ -17220,7 +17220,7 @@
 		)
 		(uuid "3ba77d41-53e6-42c5-be9e-8fd5c7effd16")
 	)
-	(label "SM2_A2"
+	(label "SM2_A1"
 		(at 208.788 272.796 0)
 		(effects
 			(font
@@ -17280,7 +17280,7 @@
 		)
 		(uuid "40781d6f-b6d2-4133-972e-3e1ddac1a9df")
 	)
-	(label "SM2_A1"
+	(label "SM2_A2"
 		(at 208.788 270.256 0)
 		(effects
 			(font
@@ -17310,7 +17310,7 @@
 		)
 		(uuid "41db4154-fba6-4eb1-8684-fc3bec3dccdf")
 	)
-	(label "SM4_A2"
+	(label "SM4_A1"
 		(at 246.888 272.796 0)
 		(effects
 			(font
@@ -17530,7 +17530,7 @@
 		)
 		(uuid "52b1a9cf-b5b3-45b9-8a87-ac0c47dee2d4")
 	)
-	(label "SM1_A1"
+	(label "SM1_A2"
 		(at 267.208 270.256 0)
 		(effects
 			(font
@@ -17600,7 +17600,7 @@
 		)
 		(uuid "583c531f-be02-4b75-9ead-7416b6a804c3")
 	)
-	(label "SM1_A2"
+	(label "SM1_A1"
 		(at 267.208 272.796 0)
 		(effects
 			(font
@@ -18380,7 +18380,7 @@
 		)
 		(uuid "a806eb1e-7d68-454b-9479-5d336ffe7f6b")
 	)
-	(label "SM3_A1"
+	(label "SM3_A2"
 		(at 229.108 270.256 0)
 		(effects
 			(font
@@ -18790,7 +18790,7 @@
 		)
 		(uuid "cfae81f4-ff5f-4941-9166-778fdf118a5b")
 	)
-	(label "SM3_A2"
+	(label "SM3_A1"
 		(at 229.108 272.796 0)
 		(effects
 			(font
