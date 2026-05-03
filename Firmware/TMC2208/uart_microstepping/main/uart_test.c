@@ -1,5 +1,6 @@
 #include <stdio.h>
-#include <inttypes.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -7,137 +8,255 @@
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 
-#define STEP_PIN    GPIO_NUM_26
-#define DIR_PIN     GPIO_NUM_25
-
-#define UART_PORT   UART_NUM_1
-#define UART_TX_PIN GPIO_NUM_13
-#define UART_RX_PIN GPIO_NUM_27
-
-#define STEP_DELAY_US 500
 static const char *TAG = "TMC2208";
 
-// ---------------- CRC Calculation ----------------
-uint8_t tmc_crc(uint8_t *datagram, int len) {
+// ---------------- PIN CONFIG ----------------
+#define STEP_PIN   GPIO_NUM_26
+#define DIR_PIN    GPIO_NUM_33
+
+#define UART_TX_PIN GPIO_NUM_14
+#define UART_RX_PIN GPIO_NUM_12
+
+#define UART_PORT  UART_NUM_1
+#define BAUDRATE   115200
+
+// ---------------- CRC ----------------
+uint8_t crc8(uint8_t *data, uint8_t len)
+{
     uint8_t crc = 0;
     for (int i = 0; i < len; i++) {
-        crc ^= datagram[i];
+        uint8_t b = data[i];
         for (int j = 0; j < 8; j++) {
-            if (crc & 0x01) crc = (crc >> 1) ^ 0x8C;
-            else crc >>= 1;
+            if ((crc >> 7) ^ (b & 1))
+                crc = (crc << 1) ^ 0x07;
+            else
+                crc <<= 1;
+            b >>= 1;
         }
     }
     return crc;
 }
 
-// ---------------- Write Register ----------------
-void tmc2208_write(uint8_t reg, uint32_t data) {
-    uint8_t datagram[8];
-    datagram[0] = 0x05;          
-    datagram[1] = 0x00;          
-    datagram[2] = reg | 0x80;    
-    datagram[3] = (data >> 24) & 0xFF;
-    datagram[4] = (data >> 16) & 0xFF;
-    datagram[5] = (data >> 8) & 0xFF;
-    datagram[6] = data & 0xFF;
-    datagram[7] = tmc_crc(datagram, 7);
-    uart_write_bytes(UART_PORT, (const char *)datagram, 8);
-    ESP_LOGI(TAG, "Write reg 0x%02X = 0x%08" PRIX32, reg, data);
-}
-
-// ---------------- Read Register ----------------
-int tmc2208_read(uint8_t reg, uint8_t *resp, int max_len) {
-    uint8_t datagram[4];
-    datagram[0] = 0x05;
-    datagram[1] = 0x00;
-    datagram[2] = reg;
-    datagram[3] = tmc_crc(datagram, 3);
-
-    uart_flush(UART_PORT);
-    uart_write_bytes(UART_PORT, (const char *)datagram, 4);
-
-    int len = uart_read_bytes(UART_PORT, resp, max_len, pdMS_TO_TICKS(100));
-    if (len > 0) {
-        ESP_LOGI(TAG, "Read reg 0x%02X response (%d bytes):", reg, len);
-        for (int i = 0; i < len; i++) {
-            printf("%02X ", resp[i]);
-        }
-        printf("\n");
-    } else {
-        ESP_LOGW(TAG, "No response from reg 0x%02X", reg);
-    }
-    return len;
-}
-
-// ---------------- Stepper Setup ----------------
-bool stepper_setup(uint8_t microstep) {
-    // UART init
-    const uart_config_t uart_config = {
-        .baud_rate = 9600,
+// ---------------- UART INIT ----------------
+void uart_init_tmc()
+{
+    uart_config_t config = {
+        .baud_rate = BAUDRATE,
         .data_bits = UART_DATA_8_BITS,
         .parity    = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
     };
-    uart_param_config(UART_PORT, &uart_config);
+
+    uart_param_config(UART_PORT, &config);
     uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN,
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    uart_driver_install(UART_PORT, 256, 256, 0, NULL, 0);
 
-    // STEP/DIR GPIO
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << STEP_PIN) | (1ULL << DIR_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = 0,
-        .pull_down_en = 0,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
+    uart_driver_install(UART_PORT, 1024, 1024, 0, NULL, 0);
 
-    gpio_set_level(DIR_PIN, 1);
+    // Improve UART responsiveness
+    uart_set_rx_timeout(UART_PORT, 2);
+    uart_set_rx_full_threshold(UART_PORT, 1);
+}
 
-    // ---- Set CHOPCONF microstepping ----
-    uint32_t chopconf = 0x000100C3;  // base config
-    chopconf &= ~(0x0F << 24);       // clear MRES
-    chopconf |= ((microstep & 0x0F) << 24); // set MRES
-    tmc2208_write(0x6C, chopconf);
+// ---------------- WRITE REGISTER ----------------
+void tmc_write(uint8_t reg, uint32_t data)
+{
+    uint8_t buf[8];
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    buf[0] = 0x05;         // sync
+    buf[1] = 0x00;         // slave addr
+    buf[2] = reg | 0x80;   // write
 
-    // Verify UART
-    uint8_t resp[16];
-    int len = tmc2208_read(0x6C, resp, sizeof(resp));
-    if (len <= 0) {
-        ESP_LOGE(TAG, "UART read failed. Check wiring and PDN_UART jumper!");
+    buf[3] = data >> 24;
+    buf[4] = data >> 16;
+    buf[5] = data >> 8;
+    buf[6] = data;
+
+    buf[7] = crc8(buf, 7);
+
+    uart_write_bytes(UART_PORT, (char*)buf, 8);
+    printf("Packet Sent: for 1/256 microstepping\n");
+    for(int i=0;i<8;i++) {
+        printf("0x%02X ", buf[i]);
+    }
+    printf("\n");
+    // uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(10));
+}
+
+// ---------------- READ REGISTER ----------------
+// ---------------- READ REGISTER (FIXED) ----------------
+bool tmc_read(uint8_t reg, uint32_t *val)
+{
+    uint8_t req[4];
+
+    req[0] = 0x05;
+    req[1] = 0x00;
+    req[2] = 0x00;   // read: MSB=0 (no 0x80)
+    req[3] = crc8(req, 3);
+
+    uart_flush_input(UART_PORT);
+
+    uart_write_bytes(UART_PORT, (char*)req, 4);
+    uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(10));
+
+    // Step 1: Read and discard the 4 echo bytes (our own TX)
+    uint8_t echo[4];
+    int echo_len = uart_read_bytes(UART_PORT, echo, 4, pdMS_TO_TICKS(50));
+    if (echo_len != 4) {
+        ESP_LOGE(TAG, "Echo read failed, got %d bytes", echo_len);
         return false;
     }
 
-    ESP_LOGI(TAG, "Stepper setup complete.");
+    // Step 2: Read the actual 8-byte response from TMC2208
+    uint8_t resp[8];
+    int len = uart_read_bytes(UART_PORT, resp, 8, pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "Response (%d bytes):", len);
+    for (int i = 0; i < len; i++) {
+        printf("0x%02X ", resp[i]);
+    }
+    printf("\n");
+
+    if (len != 8) {
+        ESP_LOGE(TAG, "Short response: got %d bytes (expected 8)", len);
+        return false;
+    }
+
+    // Verify CRC over first 7 bytes
+    uint8_t crc = crc8(resp, 7);
+    if (crc != resp[7]) {
+        ESP_LOGE(TAG, "CRC mismatch: calc=0x%02X, recv=0x%02X", crc, resp[7]);
+        return false;
+    }
+
+    *val = ((uint32_t)resp[3] << 24) |
+           ((uint32_t)resp[4] << 16) |
+           ((uint32_t)resp[5] <<  8) |
+           (uint32_t)resp[6];
     return true;
 }
 
-// ---------------- Stepper Move ----------------
-void stepper_move(int steps) {
-    for (int i = 0; i < steps; i++) {
+// bool tmc_read(uint8_t reg, uint32_t *val)
+// {
+//     uint8_t req[4];
+
+//     req[0] = 0x05;
+//     req[1] = 0x00;
+//     req[2] = reg;
+//     req[3] = crc8(req, 3);
+
+//     uart_flush_input(UART_PORT);
+
+//     uart_write_bytes(UART_PORT, (char*)req, 4);
+//     printf("test Packet Sent 2");
+//     uart_wait_tx_done(UART_PORT, pdMS_TO_TICKS(10));
+
+//     uint8_t resp[8];
+//     int len = uart_read_bytes(UART_PORT, resp, 8, 200 / portTICK_PERIOD_MS);
+//     printf("Received %d bytes:\n", len); 
+//     for(int i=0;i<len;i++) {
+//         printf("0x%02X ", resp[i]);
+//     }
+//     printf("\n");
+//     if (len == 0) {
+//         ESP_LOGE(TAG, "No response (%d)", len);
+//         return false;
+//     }
+
+//     uint8_t crc = crc8(resp, 7);
+//     if (crc != resp[7]) {
+//         ESP_LOGE(TAG, "CRC error");
+//         return false;
+//     }
+
+//     *val = (resp[3]<<24)|(resp[4]<<16)|(resp[5]<<8)|resp[6];
+//     return true;
+// }
+
+// ---------------- RETRY READ ----------------
+bool tmc_read_retry(uint8_t reg, uint32_t *val)
+{
+    for (int i = 0; i < 3; i++) {
+        if (tmc_read(reg, val)) return true;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return false;
+}
+
+// ---------------- DRIVER INIT ----------------
+void tmc_init()
+{
+    ESP_LOGI(TAG, "Initializing TMC2208...");
+
+    // GCONF: pdn_disable=1 (bit6), I_scale_analog=1 (bit0)
+    // bit6=1 disables PDN pin so UART works properly
+    tmc_write(0x00, 0x00000041);  // I_scale_analog + pdn_disable
+
+    // IHOLD_IRUN: IHOLD=10, IRUN=20, IHOLDDELAY=6
+    // bits 4:0 = IHOLD, bits 12:8 = IRUN, bits 19:16 = IHOLDDELAY
+    tmc_write(0x10, 0x00061410);
+
+    // CHOPCONF: TOFF=3, HSTRT=4, HEND=1, TBL=2, intpol=1, MRES=0(256 microsteps)
+    tmc_write(0x6C, 0x10000053);
+
+    // PWMCONF: stealthChop defaults (pwm_autoscale=1, pwm_autograd=1)
+    tmc_write(0x70, 0xC10D0024);
+
+    vTaskDelay(pdMS_TO_TICKS(200)); // Give TMC2208 time to settle
+}
+
+// void tmc_init()
+// {
+//     ESP_LOGI(TAG, "Initializing TMC2208...");
+
+//     tmc_write(0x00, 0x00000040);  // GCONF
+//     tmc_write(0x10, 0x00061F10);  // IHOLD_IRUN (current)
+//     tmc_write(0x6C, 0x000100C3);  // CHOPCONF
+//     tmc_write(0x70, 0xC10D0024);  // PWMCONF
+
+//     vTaskDelay(pdMS_TO_TICKS(100));
+// }
+
+// ---------------- STEPPER TASK ----------------
+void step_task(void *arg)
+{
+    gpio_set_level(DIR_PIN, 1);
+
+    while (1) {
         gpio_set_level(STEP_PIN, 1);
-        esp_rom_delay_us(STEP_DELAY_US);
+        esp_rom_delay_us(300);
+
         gpio_set_level(STEP_PIN, 0);
-        esp_rom_delay_us(STEP_DELAY_US);
+        esp_rom_delay_us(300);
+
+        // Prevent watchdog reset
+        vTaskDelay(1);
     }
 }
 
-// ---------------- Main ----------------
-void app_main(void) {
-    uint8_t microstep = 7; // 1/32 microstepping
-    if (!stepper_setup(microstep)) {
-        ESP_LOGE(TAG, "Stepper setup failed. Exiting...");
-        return;
+// ---------------- MAIN ----------------
+void app_main(void)
+{
+    // GPIO setup
+    gpio_set_direction(STEP_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(DIR_PIN, GPIO_MODE_OUTPUT);
+
+    // UART init
+    uart_init_tmc();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // Driver init
+    tmc_init();
+
+    // Test UART communication
+    uint32_t val;
+    if (tmc_read_retry(0x02, &val)) {
+        ESP_LOGI(TAG, "UART OK, IFCNT = %lu", val);
+    } else {
+        ESP_LOGE(TAG, "UART FAILED (check wiring!)");
     }
 
-    ESP_LOGI(TAG, "Moving 6400 steps...");
-    stepper_move(6400);
-    ESP_LOGI(TAG, "Done.");
-    uint8_t resp[16];
-    tmc2208_read(0x6C, resp, sizeof(resp));
+    // Start motor task
+    xTaskCreate(step_task, "step_task", 2048, NULL, 5, NULL);
 }
-
